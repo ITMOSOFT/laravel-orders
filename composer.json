@@ -16,12 +16,12 @@
     },
     "autoload": {
         "psr-4": {
-            "ItmoSoft\\\\Orders\\\\": "src/"
+            "ItmoSoft\\Orders\\": "src/"
         }
     },
     "autoload-dev": {
         "psr-4": {
-            "ItmoSoft\\\\Orders\\\\Tests\\\\": "tests/"
+            "ItmoSoft\\Orders\\Tests\\": "tests/"
         }
     },
     "extra": {

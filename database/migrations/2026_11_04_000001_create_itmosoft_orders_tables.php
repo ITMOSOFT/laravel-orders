@@ -9,7 +9,7 @@ return new class extends Migration {
     {
         $prefix = (string) config('itmosoft-orders.table_prefix', '');
 
-        Schema::create($prefix.'orders', function (Blueprint $table): void {
+        Schema::create($prefix.'orders', function (Blueprint $table) use ($prefix): void {
             $table->id();
             $table->string('order_number')->unique();
             $table->string('status', 32)->index();
@@ -28,7 +28,7 @@ return new class extends Migration {
             $table->timestamps();
         });
 
-        Schema::create($prefix.'order_items', function (Blueprint $table): void {
+        Schema::create($prefix.'order_items', function (Blueprint $table) use ($prefix): void {
             $table->id();
             $table->foreignId('order_id')->constrained($prefix.'orders')->cascadeOnDelete();
             $table->nullableMorphs('product');
@@ -44,7 +44,7 @@ return new class extends Migration {
             $table->timestamps();
         });
 
-        Schema::create($prefix.'order_status_histories', function (Blueprint $table): void {
+        Schema::create($prefix.'order_status_histories', function (Blueprint $table) use ($prefix): void {
             $table->id();
             $table->foreignId('order_id')->constrained($prefix.'orders')->cascadeOnDelete();
             $table->string('from_status', 32)->nullable();

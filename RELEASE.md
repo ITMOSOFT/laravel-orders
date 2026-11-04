@@ -4,18 +4,18 @@
 
 **Description:** Order management for Laravel applications with immutable item snapshots and auditable status transitions.
 
-**Tag:** `v1.0.0`
+**Tag:** `v1.0.2`
 
 ## Release title
 
-`v1.0.0 — Initial Release`
+`v1.0.2 — Fix Migration Table Prefix Scope`
 
 ## Release description
 
 ```markdown
-## ITMOSOFT Laravel Orders v1.0.0
+## ITMOSOFT Laravel Orders v1.0.2
 
-Initial release of the Laravel Orders package.
+Patch release fixing the migration closures so the configured table prefix is captured when creating foreign-key constraints.
 
 ### Features
 - Create orders from validated checkout payloads.
