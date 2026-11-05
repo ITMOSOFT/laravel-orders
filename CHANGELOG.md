@@ -1,10 +1,8 @@
 # Changelog
 
-## [1.0.2] - 2026-11-04
-- Fixed migration closure scope so the configured table prefix is available when defining foreign-key constraints.
-
 ## [1.0.1] - 2026-11-04
 - Fixed PSR-4 autoload-dev namespace mapping for the test suite.
+- Fixed migration closure scope so the configured table prefix is available when defining foreign-key constraints.
 
 ## [1.0.0] - 2026-11-04
 - Initial release.

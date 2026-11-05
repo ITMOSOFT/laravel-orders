@@ -27,10 +27,10 @@
     "extra": {
         "laravel": {
             "providers": [
-                "ItmoSoft\\\\Orders\\\\OrdersServiceProvider"
+                "ItmoSoft\\Orders\\OrdersServiceProvider"
             ],
             "aliases": {
-                "Orders": "ItmoSoft\\\\Orders\\\\Facades\\\\Orders"
+                "Orders": "ItmoSoft\\Orders\\Facades\\Orders"
             }
         }
     },
