@@ -23,23 +23,15 @@ The package migrations are auto-loaded. Publish the config only if you need to c
 use ItmoSoft\Orders\Services\OrderService;
 
 $order = app(OrderService::class)->create([
-    'customer' => $user, // optional Eloquent model (morph relation)
+    'customer' => $user, // optional persisted Eloquent model (morph relation)
     'currency' => 'USD',
     'subtotal' => 100,
     'discount_total' => 10,
     'tax_total' => 9,
     'shipping_total' => 5,
     'grand_total' => 104,
-    'billing_address' => [
-        'name' => 'Jane Doe',
-        'line1' => '10 Main Street',
-        'city' => 'Lahore',
-        'country' => 'PK',
-    ],
     'items' => [
         [
-            'product_type' => App\\Models\\Product::class,
-            'product_id' => 42,
             'name' => 'Product name',
             'sku' => 'SKU-42',
             'quantity' => 2,
@@ -47,17 +39,15 @@ $order = app(OrderService::class)->create([
             'discount_total' => 10,
             'tax_total' => 9,
             'line_total' => 99,
-            'product_snapshot' => [
-                'name' => 'Product name',
-                'sku' => 'SKU-42',
-                'attributes' => ['size' => 'M'],
-            ],
+            'product_snapshot' => ['name' => 'Product name', 'attributes' => ['size' => 'M']],
         ],
     ],
 ]);
 ```
 
-At minimum, each item requires `name`, `quantity`, and `unit_price`. If `grand_total` is omitted, the service calculates it as subtotal - discount + tax + shipping. If subtotal is omitted, it is derived from quantity × unit price across items. Provide authoritative checkout totals when discounts/taxes are calculated elsewhere.
+At minimum, each item requires a non-empty `name`, positive finite `quantity`, and non-negative finite `unit_price`. Item discounts, taxes, line totals, and order totals must be finite and non-negative. An item discount cannot exceed its pre-tax line amount, and the order discount cannot exceed subtotal. Currency must be a three-letter ISO code. Order status must exist in the configured statuses list.
+
+If `grand_total` is omitted, the service calculates it as subtotal - discount + tax + shipping. If subtotal is omitted, it is derived from quantity × unit price across items. Provide authoritative checkout totals when discounts/taxes are calculated elsewhere; the service validates values but does not replace a trusted tax/promotion calculation.
 
 ## Create from a checkout session
 
@@ -65,7 +55,6 @@ The package deliberately does not require a specific checkout package. It provid
 
 ```php
 $order = app(OrderService::class)->createFromCheckoutSession($checkoutSession, [
-    // Optional overrides for your application's field mapping.
     'notes' => 'Created from checkout',
 ]);
 ```
@@ -75,13 +64,7 @@ The adapter recognizes `name` or `product_name`, `unit_price` or `price`, and `p
 ## Status transitions
 
 ```php
-use ItmoSoft\\Orders\\Services\\OrderService;
-
-$order = app(OrderService::class)->changeStatus(
-    $order,
-    'processing',
-    'Payment confirmed'
-);
+$order = app(OrderService::class)->changeStatus($order, 'processing', 'Payment confirmed');
 ```
 
 Default transitions:
@@ -91,7 +74,7 @@ Default transitions:
 - `completed` → `refunded`
 - `cancelled` and `refunded` are terminal
 
-Invalid transitions throw `ItmoSoft\\Orders\\Exceptions\\InvalidOrderTransition`. Customize statuses and transitions in `config/itmosoft-orders.php`.
+Invalid transitions throw `ItmoSoft\\Orders\\Exceptions\\InvalidOrderTransition`. The transition is checked against the current database status under a row lock, not the possibly stale status on the supplied model. Customize statuses and transitions in `config/itmosoft-orders.php`.
 
 ## Events
 
@@ -104,7 +87,7 @@ Invalid transitions throw `ItmoSoft\\Orders\\Exceptions\\InvalidOrderTransition`
 - `ItmoSoft\\Orders\\Models\\OrderItem`
 - `ItmoSoft\\Orders\\Models\\OrderStatusHistory`
 
-The order has a polymorphic `customer()` relation. Each order item stores product identifiers plus a snapshot so later product edits/deletion do not rewrite the historical order description or price.
+The order has a polymorphic `customer()` relation. Customer models supplied directly must already be persisted. Each order item stores product identifiers plus a snapshot so later product edits/deletion do not rewrite the historical order description or price.
 
 ## Table prefix
 
@@ -114,12 +97,12 @@ Set `ITMOSOFT_ORDERS_TABLE_PREFIX` before running migrations, or publish the con
 
 ```bash
 composer install
-vendor/bin/phpunit
+composer test
 ```
 
 ## Scope boundaries
 
-This package does not process payments, reserve inventory, calculate tax, apply promotions, or implement shipping carrier integrations. Those concerns should remain in their dedicated packages/services. It stores the validated totals supplied by the checkout layer.
+This package does not process payments, reserve inventory, calculate tax, apply promotions, or implement shipping carrier integrations. It stores the validated totals supplied by the checkout layer.
 
 ## License
 

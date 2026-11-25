@@ -2,6 +2,7 @@
 
 namespace ItmoSoft\Orders\Services;
 
+use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Str;
@@ -12,7 +13,7 @@ use ItmoSoft\Orders\Exceptions\InvalidOrderTransition;
 use ItmoSoft\Orders\Models\Order;
 use ItmoSoft\Orders\Models\OrderItem;
 use ItmoSoft\Orders\Models\OrderStatusHistory;
-use Throwable;
+use RuntimeException;
 
 class OrderService
 {
@@ -20,45 +21,106 @@ class OrderService
      * Create an order from a validated checkout payload.
      *
      * Required item fields: name, quantity, unit_price.
-     * Totals are accepted from the validated checkout result; line totals are
-     * calculated only when omitted.
+     * Totals may be supplied by a trusted checkout calculation layer.
      */
     public function create(array $data): Order
     {
         $items = $data['items'] ?? [];
+
         if (! is_array($items) || $items === []) {
             throw new InvalidArgumentException('An order must contain at least one item.');
         }
 
+        $normalizedItems = [];
+
         foreach ($items as $index => $item) {
-            if (! is_array($item) || empty($item['name']) || ! isset($item['quantity'], $item['unit_price'])) {
+            if (! is_array($item) || ! isset($item['name'], $item['quantity'], $item['unit_price'])) {
                 throw new InvalidArgumentException("Order item at index {$index} requires name, quantity and unit_price.");
             }
-            if ((float) $item['quantity'] <= 0 || (float) $item['unit_price'] < 0) {
-                throw new InvalidArgumentException("Order item at index {$index} has an invalid quantity or unit price.");
+
+            $name = trim((string) $item['name']);
+            $quantity = $this->nonNegativeNumber($item['quantity'], "Order item at index {$index} quantity", allowZero: false);
+            $unitPrice = $this->nonNegativeNumber($item['unit_price'], "Order item at index {$index} unit price");
+            $lineDiscount = $this->nonNegativeNumber($item['discount_total'] ?? 0, "Order item at index {$index} discount");
+            $lineTax = $this->nonNegativeNumber($item['tax_total'] ?? 0, "Order item at index {$index} tax");
+            $lineBase = $quantity * $unitPrice;
+
+            if ($name === '') {
+                throw new InvalidArgumentException("Order item at index {$index} requires a non-empty name.");
             }
+
+            if ($lineDiscount > $lineBase) {
+                throw new InvalidArgumentException("Order item at index {$index} discount cannot exceed its pre-tax line amount.");
+            }
+
+            $lineTotal = $this->nonNegativeNumber(
+                $item['line_total'] ?? ($lineBase - $lineDiscount + $lineTax),
+                "Order item at index {$index} line total"
+            );
+
+            $normalizedItems[] = array_replace($item, [
+                'name' => $name,
+                'quantity' => $quantity,
+                'unit_price' => $unitPrice,
+                'discount_total' => $lineDiscount,
+                'tax_total' => $lineTax,
+                'line_total' => $lineTotal,
+            ]);
         }
 
-        return DB::transaction(function () use ($data, $items): Order {
-            $subtotal = (float) ($data['subtotal'] ?? collect($items)->sum(
-                fn (array $item) => (float) $item['quantity'] * (float) $item['unit_price']
-            ));
-            $discount = (float) ($data['discount_total'] ?? 0);
-            $tax = (float) ($data['tax_total'] ?? 0);
-            $shipping = (float) ($data['shipping_total'] ?? 0);
-            $grandTotal = (float) ($data['grand_total'] ?? ($subtotal - $discount + $tax + $shipping));
+        $subtotal = $this->nonNegativeNumber(
+            $data['subtotal'] ?? collect($normalizedItems)->sum(fn (array $item) => $item['quantity'] * $item['unit_price']),
+            'Order subtotal'
+        );
+        $discount = $this->nonNegativeNumber($data['discount_total'] ?? 0, 'Order discount');
+        $tax = $this->nonNegativeNumber($data['tax_total'] ?? 0, 'Order tax');
+        $shipping = $this->nonNegativeNumber($data['shipping_total'] ?? 0, 'Order shipping');
+        $grandTotal = $this->nonNegativeNumber(
+            $data['grand_total'] ?? ($subtotal - $discount + $tax + $shipping),
+            'Order grand total'
+        );
 
-            if (min($subtotal, $discount, $tax, $shipping, $grandTotal) < 0) {
-                throw new InvalidArgumentException('Order totals cannot be negative.');
-            }
+        if ($discount > $subtotal) {
+            throw new InvalidArgumentException('Order discount cannot exceed subtotal.');
+        }
 
+        $currency = strtoupper(trim((string) ($data['currency'] ?? config('itmosoft-orders.currency', 'USD'))));
+
+        if (! preg_match('/^[A-Z]{3}$/', $currency)) {
+            throw new InvalidArgumentException('Order currency must be a three-letter ISO currency code.');
+        }
+
+        $status = (string) ($data['status'] ?? 'pending');
+
+        if (! in_array($status, config('itmosoft-orders.statuses', []), true)) {
+            throw new InvalidArgumentException("Order status [{$status}] is not configured.");
+        }
+
+        $orderNumber = trim((string) ($data['order_number'] ?? $this->generateOrderNumber()));
+
+        if ($orderNumber === '') {
+            throw new InvalidArgumentException('Order number cannot be empty.');
+        }
+
+        return DB::transaction(function () use (
+            $data,
+            $normalizedItems,
+            $subtotal,
+            $discount,
+            $tax,
+            $shipping,
+            $grandTotal,
+            $currency,
+            $status,
+            $orderNumber
+        ): Order {
             $orderClass = config('itmosoft-orders.models.order', Order::class);
             /** @var Order $order */
             $order = new $orderClass();
             $order->fill([
-                'order_number' => $data['order_number'] ?? $this->generateOrderNumber(),
-                'status' => $data['status'] ?? 'pending',
-                'currency' => strtoupper($data['currency'] ?? config('itmosoft-orders.currency', 'USD')),
+                'order_number' => $orderNumber,
+                'status' => $status,
+                'currency' => $currency,
                 'subtotal' => $subtotal,
                 'discount_total' => $discount,
                 'tax_total' => $tax,
@@ -71,9 +133,17 @@ class OrderService
                 'placed_at' => $data['placed_at'] ?? now(),
             ]);
 
-            if (! empty($data['customer']) && is_object($data['customer'])) {
+            if (isset($data['customer'])) {
+                if (! $data['customer'] instanceof Model || ! $data['customer']->exists) {
+                    throw new InvalidArgumentException('Customer must be a persisted Eloquent model.');
+                }
+
                 $order->customer()->associate($data['customer']);
-            } elseif (! empty($data['customer_type']) && ! empty($data['customer_id'])) {
+            } elseif (isset($data['customer_type']) || isset($data['customer_id'])) {
+                if (empty($data['customer_type']) || ! isset($data['customer_id']) || $data['customer_id'] === '') {
+                    throw new InvalidArgumentException('Both customer_type and customer_id are required when assigning a customer.');
+                }
+
                 $order->customer_type = $data['customer_type'];
                 $order->customer_id = $data['customer_id'];
             }
@@ -81,13 +151,8 @@ class OrderService
             $order->save();
 
             $itemClass = config('itmosoft-orders.models.order_item', OrderItem::class);
-            foreach ($items as $item) {
-                $quantity = (float) $item['quantity'];
-                $unitPrice = (float) $item['unit_price'];
-                $lineDiscount = (float) ($item['discount_total'] ?? 0);
-                $lineTax = (float) ($item['tax_total'] ?? 0);
-                $lineTotal = (float) ($item['line_total'] ?? ($quantity * $unitPrice - $lineDiscount + $lineTax));
 
+            foreach ($normalizedItems as $item) {
                 /** @var OrderItem $orderItem */
                 $orderItem = new $itemClass();
                 $orderItem->fill([
@@ -95,11 +160,11 @@ class OrderService
                     'product_id' => $item['product_id'] ?? null,
                     'name' => $item['name'],
                     'sku' => $item['sku'] ?? null,
-                    'quantity' => $quantity,
-                    'unit_price' => $unitPrice,
-                    'discount_total' => $lineDiscount,
-                    'tax_total' => $lineTax,
-                    'line_total' => $lineTotal,
+                    'quantity' => $item['quantity'],
+                    'unit_price' => $item['unit_price'],
+                    'discount_total' => $item['discount_total'],
+                    'tax_total' => $item['tax_total'],
+                    'line_total' => $item['line_total'],
                     'product_snapshot' => $item['product_snapshot'] ?? null,
                     'metadata' => $item['metadata'] ?? null,
                 ]);
@@ -132,10 +197,12 @@ class OrderService
             if (method_exists($object, 'getAttribute')) {
                 return $object->getAttribute($key) ?? $default;
             }
+
             return $object->{$key} ?? $default;
         };
 
         $sessionItems = $read($session, 'items', []);
+
         if (is_object($sessionItems) && method_exists($sessionItems, 'toArray')) {
             $sessionItems = $sessionItems->toArray();
         }
@@ -172,16 +239,26 @@ class OrderService
 
     public function changeStatus(Order $order, string $to, ?string $comment = null): Order
     {
-        $from = (string) $order->status;
-        $allowed = config("itmosoft-orders.transitions.{$from}", []);
-
-        if (! in_array($to, config('itmosoft-orders.statuses', []), true) || ! in_array($to, $allowed, true)) {
-            throw new InvalidOrderTransition("Order status cannot transition from [{$from}] to [{$to}].");
+        if (! $order->exists || $order->getKey() === null) {
+            throw new InvalidArgumentException('Order must be persisted before changing its status.');
         }
 
-        return DB::transaction(function () use ($order, $from, $to, $comment): Order {
-            $order->status = $to;
-            $order->save();
+        return DB::transaction(function () use ($order, $to, $comment): Order {
+            $orderClass = config('itmosoft-orders.models.order', Order::class);
+            /** @var Order $locked */
+            $locked = $orderClass::query()->whereKey($order->getKey())->lockForUpdate()->firstOrFail();
+            $from = (string) $locked->status;
+            $allowed = config("itmosoft-orders.transitions.{$from}", []);
+
+            if (
+                ! in_array($to, config('itmosoft-orders.statuses', []), true)
+                || ! in_array($to, $allowed, true)
+            ) {
+                throw new InvalidOrderTransition("Order status cannot transition from [{$from}] to [{$to}].");
+            }
+
+            $locked->status = $to;
+            $locked->save();
 
             $historyClass = config('itmosoft-orders.models.status_history', OrderStatusHistory::class);
             $history = new $historyClass([
@@ -190,11 +267,11 @@ class OrderService
                 'comment' => $comment,
                 'changed_at' => now(),
             ]);
-            $order->statusHistory()->save($history);
+            $locked->statusHistory()->save($history);
 
-            Event::dispatch(new OrderStatusChanged($order->fresh(), $from, $to, $comment));
+            Event::dispatch(new OrderStatusChanged($locked->fresh(), $from, $to, $comment));
 
-            return $order->fresh(['items', 'statusHistory']);
+            return $locked->fresh(['items', 'statusHistory']);
         });
     }
 
@@ -206,5 +283,21 @@ class OrderService
         $length = max(4, (int) ($settings['random_length'] ?? 8));
 
         return $prefix.'-'.$date.'-'.Str::upper(Str::random($length));
+    }
+
+    private function nonNegativeNumber(mixed $value, string $label, bool $allowZero = true): float
+    {
+        if (! is_numeric($value)) {
+            throw new InvalidArgumentException("{$label} must be a finite numeric value.");
+        }
+
+        $number = (float) $value;
+
+        if (! is_finite($number) || ($allowZero ? $number < 0 : $number <= 0)) {
+            $constraint = $allowZero ? 'non-negative' : 'greater than zero';
+            throw new InvalidArgumentException("{$label} must be finite and {$constraint}.");
+        }
+
+        return $number;
     }
 }

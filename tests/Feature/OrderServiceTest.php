@@ -5,6 +5,7 @@ namespace ItmoSoft\Orders\Tests\Feature;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Schema;
+use InvalidArgumentException;
 use ItmoSoft\Orders\Events\OrderCreated;
 use ItmoSoft\Orders\Events\OrderStatusChanged;
 use ItmoSoft\Orders\Exceptions\InvalidOrderTransition;
@@ -25,7 +26,7 @@ class OrderServiceTest extends TestCase
         Event::fake([OrderCreated::class]);
 
         $order = app(OrderService::class)->create([
-            'currency' => 'usd',
+            'currency' => ' usd ',
             'items' => [[
                 'name' => 'Demo product',
                 'sku' => 'DEMO-01',
@@ -71,7 +72,78 @@ class OrderServiceTest extends TestCase
 
     public function test_it_requires_at_least_one_item(): void
     {
-        $this->expectException(\InvalidArgumentException::class);
+        $this->expectException(InvalidArgumentException::class);
         app(OrderService::class)->create(['items' => []]);
+    }
+
+    public function test_it_rejects_non_finite_item_values(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+
+        app(OrderService::class)->create([
+            'items' => [['name' => 'Item', 'quantity' => INF, 'unit_price' => 10]],
+        ]);
+    }
+
+    public function test_it_rejects_non_finite_order_totals(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+
+        app(OrderService::class)->create([
+            'grand_total' => NAN,
+            'items' => [['name' => 'Item', 'quantity' => 1, 'unit_price' => 10]],
+        ]);
+    }
+
+    public function test_it_rejects_discount_larger_than_subtotal(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+
+        app(OrderService::class)->create([
+            'subtotal' => 10,
+            'discount_total' => 11,
+            'items' => [['name' => 'Item', 'quantity' => 1, 'unit_price' => 10]],
+        ]);
+    }
+
+    public function test_it_rejects_invalid_currency_and_status(): void
+    {
+        try {
+            app(OrderService::class)->create([
+                'currency' => 'USDD',
+                'items' => [['name' => 'Item', 'quantity' => 1, 'unit_price' => 10]],
+            ]);
+            $this->fail('Invalid currency should be rejected.');
+        } catch (InvalidArgumentException) {
+            $this->assertTrue(true);
+        }
+
+        $this->expectException(InvalidArgumentException::class);
+        app(OrderService::class)->create([
+            'status' => 'unknown',
+            'items' => [['name' => 'Item', 'quantity' => 1, 'unit_price' => 10]],
+        ]);
+    }
+
+    public function test_status_transition_uses_current_database_status_not_stale_model_state(): void
+    {
+        $service = app(OrderService::class);
+        $order = $service->create([
+            'items' => [['name' => 'Item', 'quantity' => 1, 'unit_price' => 10]],
+        ]);
+
+        $service->changeStatus($order, 'processing');
+        $staleProcessingOrder = Order::query()->findOrFail($order->id);
+        $service->changeStatus($order->fresh(), 'completed');
+
+        $this->expectException(InvalidOrderTransition::class);
+        $service->changeStatus($staleProcessingOrder, 'cancelled');
+    }
+
+    public function test_it_rejects_an_unsaved_order_status_change(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+
+        app(OrderService::class)->changeStatus(new Order(), 'processing');
     }
 }
